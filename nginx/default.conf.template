@@ -1,0 +1,86 @@
+# Rendered at container start: ${DOMAIN} is substituted from the DOMAIN env var,
+# every other $variable (nginx runtime vars) is left untouched.
+#
+#   :80   -> serves the ACME (Let's Encrypt) challenge, redirects the rest to HTTPS
+#   :443  -> serves the SPA and proxies /api + /socket.io to the backend
+#
+# Single origin: the browser only talks to https://${DOMAIN}, so there is no CORS.
+
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+upstream api_upstream {
+    server api:3000;
+}
+
+upstream client_upstream {
+    server client:80;
+}
+
+# ---- HTTP: certificate challenge + redirect to HTTPS ----
+server {
+    listen 80;
+    server_name ${DOMAIN};
+
+    # Let's Encrypt http-01 challenge (Certbot writes files here)
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+# ---- HTTPS: the actual application ----
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name ${DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+    ssl_session_cache   shared:SSL:10m;
+    ssl_session_timeout 1d;
+
+    # file uploads (images, course covers, avatars...)
+    client_max_body_size 20m;
+
+    # --- backend API ---
+    location /api/ {
+        proxy_pass http://api_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 60s;
+    }
+
+    # --- websockets (socket.io) ---
+    location /socket.io/ {
+        proxy_pass http://api_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 3600s;
+    }
+
+    # --- frontend SPA (everything else) ---
+    location / {
+        proxy_pass http://client_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

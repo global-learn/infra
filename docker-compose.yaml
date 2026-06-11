@@ -1,0 +1,119 @@
+# Production deploy stack (HTTPS via Let's Encrypt). See README.md for details.
+#
+#   1. cp .env.example .env   &&   edit secrets (incl. DOMAIN + ACME_EMAIL)
+#   2. docker login ghcr.io           (once, see README.md)
+#   3. ./init-letsencrypt.sh          (once — issues the TLS certificate)
+#   4. docker compose up -d
+#
+# Updating to a new release later is just:  docker compose pull && docker compose up -d
+# (the certificate renews itself via the certbot service)
+
+services:
+  postgres:
+    image: postgres:18.1-alpine
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:8.6.0-alpine
+    restart: unless-stopped
+
+  minio:
+    image: quay.io/minio/minio:RELEASE.2023-09-07T02-05-02Z
+    restart: unless-stopped
+    command: server /data --address ":9000" --console-address ":9090"
+    env_file:
+      - .env
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:9000/minio/health/live']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # one-shot: create the app bucket if it does not exist yet, then exit
+  minio-init:
+    image: minio/mc:RELEASE.2023-09-07T22-48-55Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    env_file:
+      - .env
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} &&
+      mc mb --ignore-existing local/$${MINIO_BUCKET_NAME} &&
+      echo 'bucket ready';
+      "
+    restart: "no"
+
+  api:
+    image: ghcr.io/toooweee/global-learn-cl:latest
+    restart: unless-stopped
+    pull_policy: always
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      minio:
+        condition: service_healthy
+    # container entrypoint runs `prisma migrate deploy` before starting the app
+    expose:
+      - '3000'
+
+  client:
+    image: ghcr.io/global-learn/mvp-client:latest
+    restart: unless-stopped
+    pull_policy: always
+    expose:
+      - '80'
+
+  # edge: serves the SPA, proxies /api + /socket.io to the backend (single origin),
+  # terminates HTTPS. The ${DOMAIN} placeholder in the template is rendered at start.
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - api
+      - client
+    environment:
+      DOMAIN: ${DOMAIN}
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - certbot_certs:/etc/letsencrypt:ro
+      - certbot_www:/var/www/certbot:ro
+    # reload every 6h so renewed certificates are picked up without downtime
+    command: >
+      /bin/sh -c "while :; do sleep 6h & wait $${!}; nginx -s reload; done &
+      exec /docker-entrypoint.sh nginx -g 'daemon off;'"
+
+  # issues the TLS certificate and renews it automatically (checks every 12h)
+  certbot:
+    image: certbot/certbot:latest
+    restart: unless-stopped
+    volumes:
+      - certbot_certs:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+    entrypoint: >
+      /bin/sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot; sleep 12h & wait $${!}; done"
+
+volumes:
+  postgres_data:
+  minio_data:
+  certbot_certs:
+  certbot_www:

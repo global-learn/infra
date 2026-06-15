@@ -88,8 +88,11 @@ services:
     depends_on:
       - api
       - client
+      - minio
     environment:
       DOMAIN: ${DOMAIN}
+      # used to render the MinIO passthrough location in the nginx template
+      MINIO_BUCKET_NAME: ${MINIO_BUCKET_NAME}
     ports:
       - '80:80'
       - '443:443'

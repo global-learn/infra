@@ -19,6 +19,10 @@ upstream client_upstream {
     server client:80;
 }
 
+upstream minio_upstream {
+    server minio:9000;
+}
+
 # ---- HTTP: certificate challenge + redirect to HTTPS ----
 server {
     listen 80;
@@ -72,6 +76,22 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_read_timeout 3600s;
+    }
+
+    # --- MinIO object storage (presigned file/image/certificate links) ---
+    # Path-style bucket URL. Host MUST be preserved unchanged — the AWS SigV4
+    # signature on presigned URLs is computed over the host, so rewriting it
+    # would make MinIO reject every link with SignatureDoesNotMatch.
+    location /${MINIO_BUCKET_NAME}/ {
+        proxy_pass http://minio_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 300s;
+        proxy_read_timeout 300s;
+        proxy_buffering off;
     }
 
     # --- frontend SPA (everything else) ---

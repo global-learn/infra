@@ -11,18 +11,6 @@ map $http_upgrade $connection_upgrade {
     ''      close;
 }
 
-upstream api_upstream {
-    server api:3000;
-}
-
-upstream client_upstream {
-    server client:80;
-}
-
-upstream minio_upstream {
-    server minio:9000;
-}
-
 # ---- HTTP: certificate challenge + redirect to HTTPS ----
 server {
     listen 80;
@@ -54,9 +42,16 @@ server {
     # file uploads (images, course covers, avatars...)
     client_max_body_size 20m;
 
+    # Docker's embedded DNS. Re-resolving upstreams at runtime (instead of once
+    # at startup via `upstream` blocks) means a recreated container's NEW IP is
+    # picked up automatically — no nginx restart needed on every api deploy.
+    # Requires upstream hosts to be used via a variable in proxy_pass.
+    resolver 127.0.0.11 valid=10s ipv6=off;
+
     # --- backend API ---
     location /api/ {
-        proxy_pass http://api_upstream;
+        set $api_target api:3000;
+        proxy_pass http://$api_target;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -67,7 +62,8 @@ server {
 
     # --- websockets (socket.io) ---
     location /socket.io/ {
-        proxy_pass http://api_upstream;
+        set $api_target api:3000;
+        proxy_pass http://$api_target;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
@@ -83,7 +79,8 @@ server {
     # signature on presigned URLs is computed over the host, so rewriting it
     # would make MinIO reject every link with SignatureDoesNotMatch.
     location /${MINIO_BUCKET_NAME}/ {
-        proxy_pass http://minio_upstream;
+        set $minio_target minio:9000;
+        proxy_pass http://$minio_target;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -96,7 +93,8 @@ server {
 
     # --- frontend SPA (everything else) ---
     location / {
-        proxy_pass http://client_upstream;
+        set $client_target client:80;
+        proxy_pass http://$client_target;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
